@@ -6,7 +6,7 @@
 
 1. Open your n8n instance
 2. Go to **Workflows** → **Import from File**
-3. Select `Enhanced_Survey_Chat_Workflow.json`
+3. Select `automated_survey_v2.json`
 
 ### 2. Configure Credentials
 
@@ -101,6 +101,6 @@ Google Form → Form Responses Sheet
 
 ## Files Included
 
-- `Enhanced_Survey_Chat_Workflow.json` - n8n workflow
+- `automated_survey_v2.json` - n8n workflow
 - `survey_chat_interface.html` - Chat UI (open in browser)
 - `SETUP_GUIDE.md` - This file
