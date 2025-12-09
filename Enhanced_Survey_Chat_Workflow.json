@@ -1,0 +1,704 @@
+{
+    "name": "Enhanced Survey Chat System",
+    "nodes": [
+        {
+            "parameters": {
+                "pollTimes": {
+                    "item": [
+                        {
+                            "mode": "everyMinute"
+                        }
+                    ]
+                },
+                "documentId": {
+                    "__rl": true,
+                    "mode": "list",
+                    "value": "YOUR_SHEET_ID"
+                },
+                "sheetName": {
+                    "__rl": true,
+                    "mode": "list",
+                    "value": "gid=0",
+                    "cachedResultName": "Form Responses"
+                },
+                "options": {}
+            },
+            "type": "n8n-nodes-base.googleSheetsTrigger",
+            "typeVersion": 1,
+            "position": [
+                -560,
+                -200
+            ],
+            "id": "trigger-form-responses",
+            "name": "Form Response Trigger",
+            "notes": "Triggers when new Google Form responses arrive"
+        },
+        {
+            "parameters": {
+                "operation": "append",
+                "documentId": {
+                    "__rl": true,
+                    "value": "YOUR_SHEET_ID",
+                    "mode": "list"
+                },
+                "sheetName": {
+                    "__rl": true,
+                    "value": "gid=1",
+                    "mode": "list",
+                    "cachedResultName": "Raw Responses"
+                },
+                "columns": {
+                    "mappingMode": "autoMapInputData",
+                    "value": {},
+                    "matchingColumns": [],
+                    "schema": []
+                },
+                "options": {}
+            },
+            "name": "Store Raw Response",
+            "type": "n8n-nodes-base.googleSheets",
+            "typeVersion": 4,
+            "position": [
+                -176,
+                -400
+            ],
+            "id": "store-raw-response"
+        },
+        {
+            "parameters": {
+                "jsCode": "// Extract and structure form responses\nconst item = $input.first().json;\nconst timestamp = item.Timestamp || new Date().toISOString();\nconst responseId = `resp_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;\n\n// Get all fields except Timestamp\nconst responses = [];\nfor (const [key, value] of Object.entries(item)) {\n  if (key !== 'Timestamp' && key !== 'row_number' && value) {\n    responses.push({\n      question: key,\n      answer: String(value),\n      originalAnswer: String(value)\n    });\n  }\n}\n\n// Combine all responses into a single text for AI processing\nconst combinedFeedback = responses.map(r => \n  `Question: ${r.question}\\nAnswer: ${r.answer}`\n).join('\\n\\n');\n\n// Calculate basic stats\nconst wordCount = combinedFeedback.split(/\\s+/).length;\nconst hasNegativeIndicators = /bad|terrible|awful|hate|worst|poor|disappointing|frustrat/i.test(combinedFeedback);\nconst hasPositiveIndicators = /great|excellent|amazing|love|best|wonderful|fantastic/i.test(combinedFeedback);\n\nreturn [{\n  json: {\n    timestamp,\n    responseId,\n    responses,\n    combinedFeedback,\n    rawData: item,\n    stats: {\n      questionCount: responses.length,\n      wordCount,\n      likelyTone: hasNegativeIndicators ? 'critical' : (hasPositiveIndicators ? 'positive' : 'neutral')\n    }\n  }\n}];"
+            },
+            "name": "Structure Response Data",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                -176,
+                -200
+            ],
+            "id": "structure-response",
+            "notes": "Extracts questions and answers from form submission with initial analysis"
+        },
+        {
+            "parameters": {
+                "method": "POST",
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent",
+                "authentication": "genericCredentialType",
+                "genericAuthType": "httpHeaderAuth",
+                "sendBody": true,
+                "specifyBody": "json",
+                "jsonBody": "={\n  \"contents\": [{\n    \"parts\": [{\n      \"text\": \"You are a balanced feedback coach. Your job is to present feedback HONESTLY without sugarcoating, but with empathy and constructive framing.\\n\\nCRITICAL RULES:\\n1. NEVER downplay or minimize critical feedback - if something is a serious concern, it should remain a serious concern\\n2. Remove unnecessarily harsh language (insults, personal attacks) but preserve the core criticism\\n3. Frame issues as opportunities for growth, but don't pretend problems don't exist\\n4. Keep specific details and examples - these are valuable\\n5. If feedback is genuinely positive, don't add fake concerns\\n6. The user NEEDS to hear difficult truths - just delivered thoughtfully\\n\\nThink of yourself as a trusted mentor who tells it like it is, but cares about how the message lands.\\n\\nOriginal Feedback:\\n{{ $json.combinedFeedback }}\\n\\nLikely tone detected: {{ $json.stats.likelyTone }}\\n\\nProvide the transformed feedback in JSON format:\\n{\\n  \\\"transformedResponses\\\": [\\n    {\\n      \\\"question\\\": \\\"original question\\\",\\n      \\\"originalAnswer\\\": \\\"original answer\\\",\\n      \\\"transformedAnswer\\\": \\\"honest, constructive version\\\",\\n      \\\"sentiment\\\": \\\"positive/neutral/critical\\\",\\n      \\\"severity\\\": \\\"low/medium/high\\\"\\n    }\\n  ],\\n  \\\"summary\\\": \\\"Brief honest overview of the feedback\\\",\\n  \\\"keyThemes\\\": [\\\"theme1\\\", \\\"theme2\\\"],\\n  \\\"actionItems\\\": [\\\"specific action 1\\\", \\\"specific action 2\\\"]\\n}\\n\\nReturn ONLY the JSON, no markdown formatting.\"\n    }]\n  }]\n}",
+                "options": {}
+            },
+            "name": "Gemini - Transform Feedback",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4.2,
+            "position": [
+                80,
+                -200
+            ],
+            "id": "gemini-transform",
+            "notes": "Balanced feedback transformation - honest but empathetic"
+        },
+        {
+            "parameters": {
+                "jsCode": "// Parse Gemini response and handle errors gracefully\nconst item = $input.first().json;\nconst originalData = $('Structure Response Data').first().json;\n\ntry {\n  // Extract the text from Gemini response\n  const geminiText = item.candidates[0].content.parts[0].text;\n  \n  // Clean JSON if wrapped in markdown\n  let cleanText = geminiText.trim();\n  cleanText = cleanText.replace(/```json\\n?/g, '').replace(/```\\n?/g, '').trim();\n  \n  // Parse the JSON\n  const aiResult = JSON.parse(cleanText);\n  \n  return [{\n    json: {\n      timestamp: originalData.timestamp,\n      responseId: originalData.responseId,\n      transformedResponses: aiResult.transformedResponses,\n      summary: aiResult.summary,\n      keyThemes: aiResult.keyThemes || [],\n      actionItems: aiResult.actionItems || [],\n      processedAt: new Date().toISOString(),\n      status: 'success',\n      originalStats: originalData.stats\n    }\n  }];\n  \n} catch (error) {\n  // Fallback: use original responses if AI parsing fails\n  console.error('AI parsing error:', error.message);\n  \n  return [{\n    json: {\n      timestamp: originalData.timestamp,\n      responseId: originalData.responseId,\n      transformedResponses: originalData.responses.map(r => ({\n        question: r.question,\n        originalAnswer: r.answer,\n        transformedAnswer: r.answer,\n        sentiment: 'neutral',\n        severity: 'medium'\n      })),\n      summary: 'Processing encountered an issue - showing original responses',\n      keyThemes: [],\n      actionItems: [],\n      processedAt: new Date().toISOString(),\n      status: 'fallback',\n      error: error.message,\n      originalStats: originalData.stats\n    }\n  }];\n}"
+            },
+            "name": "Parse AI Response",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                320,
+                -200
+            ],
+            "id": "parse-ai-response",
+            "notes": "Extracts transformed feedback with enhanced fields"
+        },
+        {
+            "parameters": {
+                "jsCode": "// Format each response as a separate row for the sheet\nconst item = $input.first().json;\nconst rows = [];\n\nfor (const response of item.transformedResponses) {\n  rows.push({\n    json: {\n      timestamp: item.timestamp,\n      responseId: item.responseId,\n      question: response.question,\n      originalAnswer: response.originalAnswer,\n      transformedAnswer: response.transformedAnswer,\n      sentiment: response.sentiment || 'neutral',\n      severity: response.severity || 'medium',\n      processedAt: item.processedAt,\n      summary: item.summary,\n      keyThemes: (item.keyThemes || []).join(', '),\n      actionItems: (item.actionItems || []).join(' | ')\n    }\n  });\n}\n\nreturn rows;"
+            },
+            "name": "Format for Sheets",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                560,
+                -200
+            ],
+            "id": "format-for-sheets",
+            "notes": "Converts to individual rows for Google Sheets with enhanced fields"
+        },
+        {
+            "parameters": {
+                "operation": "append",
+                "documentId": {
+                    "__rl": true,
+                    "value": "YOUR_SHEET_ID",
+                    "mode": "list"
+                },
+                "sheetName": {
+                    "__rl": true,
+                    "value": "gid=2",
+                    "mode": "list",
+                    "cachedResultName": "Cleaned Responses"
+                },
+                "columns": {
+                    "mappingMode": "defineBelow",
+                    "value": {
+                        "Timestamp": "={{ $json.timestamp }}",
+                        "ResponseID": "={{ $json.responseId }}",
+                        "Question": "={{ $json.question }}",
+                        "OriginalAnswer": "={{ $json.originalAnswer }}",
+                        "TransformedAnswer": "={{ $json.transformedAnswer }}",
+                        "Sentiment": "={{ $json.sentiment }}",
+                        "Severity": "={{ $json.severity }}",
+                        "ProcessedAt": "={{ $json.processedAt }}",
+                        "Summary": "={{ $json.summary }}",
+                        "KeyThemes": "={{ $json.keyThemes }}",
+                        "ActionItems": "={{ $json.actionItems }}"
+                    },
+                    "matchingColumns": [],
+                    "schema": []
+                },
+                "options": {}
+            },
+            "name": "Store Cleaned Response",
+            "type": "n8n-nodes-base.googleSheets",
+            "typeVersion": 4,
+            "position": [
+                800,
+                -200
+            ],
+            "id": "store-cleaned-response"
+        },
+        {
+            "parameters": {
+                "httpMethod": "POST",
+                "path": "chat-feedback",
+                "responseMode": "responseNode",
+                "options": {
+                    "responseHeaders": {
+                        "entries": [
+                            {
+                                "name": "Access-Control-Allow-Origin",
+                                "value": "*"
+                            },
+                            {
+                                "name": "Access-Control-Allow-Methods",
+                                "value": "POST, OPTIONS"
+                            },
+                            {
+                                "name": "Access-Control-Allow-Headers",
+                                "value": "Content-Type"
+                            }
+                        ]
+                    }
+                }
+            },
+            "name": "Webhook - Chat Interface",
+            "type": "n8n-nodes-base.webhook",
+            "typeVersion": 2,
+            "position": [
+                -560,
+                200
+            ],
+            "webhookId": "chat-feedback-ai",
+            "id": "webhook-chat",
+            "notes": "Endpoint for chatting with survey data - CORS enabled"
+        },
+        {
+            "parameters": {
+                "httpMethod": "OPTIONS",
+                "path": "chat-feedback",
+                "responseMode": "responseNode",
+                "options": {}
+            },
+            "name": "Webhook - CORS Preflight",
+            "type": "n8n-nodes-base.webhook",
+            "typeVersion": 2,
+            "position": [
+                -560,
+                400
+            ],
+            "webhookId": "chat-feedback-ai-cors",
+            "id": "webhook-cors",
+            "notes": "Handles CORS preflight requests"
+        },
+        {
+            "parameters": {
+                "respondWith": "noData",
+                "options": {
+                    "responseHeaders": {
+                        "entries": [
+                            {
+                                "name": "Access-Control-Allow-Origin",
+                                "value": "*"
+                            },
+                            {
+                                "name": "Access-Control-Allow-Methods",
+                                "value": "POST, OPTIONS"
+                            },
+                            {
+                                "name": "Access-Control-Allow-Headers",
+                                "value": "Content-Type"
+                            }
+                        ]
+                    }
+                }
+            },
+            "name": "CORS Response",
+            "type": "n8n-nodes-base.respondToWebhook",
+            "typeVersion": 1,
+            "position": [
+                -320,
+                400
+            ],
+            "id": "cors-response"
+        },
+        {
+            "parameters": {
+                "jsCode": "// Session Manager - handles session creation and message extraction\nconst webhookData = $input.first().json.body || $input.first().json;\n\n// Extract or generate session ID\nlet sessionId = webhookData.sessionId || webhookData.session_id;\nif (!sessionId) {\n  sessionId = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;\n}\n\n// Extract user message\nconst userMessage = webhookData.message || webhookData.query || 'Summarize all my feedback';\n\n// Get conversation history from request (if provided by frontend)\nconst conversationHistory = webhookData.history || [];\n\nreturn [{\n  json: {\n    sessionId,\n    userMessage,\n    conversationHistory,\n    timestamp: new Date().toISOString(),\n    isNewSession: !webhookData.sessionId\n  }\n}];"
+            },
+            "name": "Session Manager",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                -320,
+                200
+            ],
+            "id": "session-manager",
+            "notes": "Manages chat sessions and extracts user messages"
+        },
+        {
+            "parameters": {
+                "documentId": {
+                    "__rl": true,
+                    "value": "YOUR_SHEET_ID",
+                    "mode": "list"
+                },
+                "sheetName": {
+                    "__rl": true,
+                    "value": "gid=2",
+                    "mode": "list",
+                    "cachedResultName": "Cleaned Responses"
+                },
+                "options": {}
+            },
+            "name": "Fetch All Feedback",
+            "type": "n8n-nodes-base.googleSheets",
+            "typeVersion": 4,
+            "position": [
+                -80,
+                200
+            ],
+            "id": "fetch-all-feedback"
+        },
+        {
+            "parameters": {
+                "jsCode": "// Aggregate and prepare comprehensive context for AI\nconst sessionData = $('Session Manager').first().json;\nconst feedbackRows = $input.all();\n\n// Build comprehensive feedback context\nlet feedbackContext = '';\nlet themes = new Set();\nlet sentimentCounts = { positive: 0, neutral: 0, critical: 0, unknown: 0 };\nlet allActionItems = [];\nlet responseCount = 0;\nlet uniqueResponses = new Set();\n\n// Process all feedback (deduplicate by ResponseID)\nfor (const row of feedbackRows) {\n  const data = row.json;\n  if (!data.Question || !data.TransformedAnswer) continue;\n  \n  const responseKey = `${data.ResponseID}_${data.Question}`;\n  if (uniqueResponses.has(responseKey)) continue;\n  uniqueResponses.add(responseKey);\n  \n  responseCount++;\n  \n  // Count sentiments\n  const sentiment = (data.Sentiment || 'unknown').toLowerCase();\n  if (sentimentCounts.hasOwnProperty(sentiment)) {\n    sentimentCounts[sentiment]++;\n  } else {\n    sentimentCounts.unknown++;\n  }\n  \n  // Collect themes\n  if (data.KeyThemes) {\n    data.KeyThemes.split(',').forEach(t => themes.add(t.trim()));\n  }\n  \n  // Collect action items\n  if (data.ActionItems) {\n    data.ActionItems.split('|').forEach(a => {\n      const trimmed = a.trim();\n      if (trimmed && !allActionItems.includes(trimmed)) {\n        allActionItems.push(trimmed);\n      }\n    });\n  }\n  \n  // Build context (limit to prevent token overflow)\n  if (feedbackContext.length < 15000) {\n    feedbackContext += `\\n---\\nResponse: ${data.ResponseID || 'N/A'}\\nDate: ${data.Timestamp || 'N/A'}\\nQ: ${data.Question}\\nOriginal: ${data.OriginalAnswer}\\nCleaned: ${data.TransformedAnswer}\\nSentiment: ${sentiment}\\nSeverity: ${data.Severity || 'N/A'}\\n`;\n  }\n}\n\n// Build conversation history context\nlet historyContext = '';\nconst history = sessionData.conversationHistory || [];\nif (history.length > 0) {\n  historyContext = '\\n\\n--- Previous Conversation ---\\n';\n  // Keep last 10 exchanges to prevent token overflow\n  const recentHistory = history.slice(-20);\n  for (const msg of recentHistory) {\n    historyContext += `${msg.role.toUpperCase()}: ${msg.content}\\n`;\n  }\n  historyContext += '--- End of History ---\\n';\n}\n\n// Summary stats\nconst summary = {\n  totalResponses: responseCount,\n  sentimentBreakdown: sentimentCounts,\n  topThemes: Array.from(themes).slice(0, 10),\n  priorityActions: allActionItems.slice(0, 5)\n};\n\nreturn [{\n  json: {\n    sessionId: sessionData.sessionId,\n    userMessage: sessionData.userMessage,\n    feedbackContext: feedbackContext || 'No feedback data available yet.',\n    historyContext,\n    summary,\n    hasData: responseCount > 0\n  }\n}];"
+            },
+            "name": "Aggregate Context",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                160,
+                200
+            ],
+            "id": "aggregate-context",
+            "notes": "Builds comprehensive context with history and statistics"
+        },
+        {
+            "parameters": {
+                "method": "POST",
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent",
+                "authentication": "genericCredentialType",
+                "genericAuthType": "httpHeaderAuth",
+                "sendBody": true,
+                "specifyBody": "json",
+                "jsonBody": "={\n  \"contents\": [{\n    \"parts\": [{\n      \"text\": \"You are a thoughtful feedback analyst and mentor. Your role is to help the user understand their survey feedback deeply and honestly.\\n\\nCRITICAL COMMUNICATION STYLE:\\n1. Be HONEST - never downplay or minimize serious concerns\\n2. Be EMPATHETIC - deliver difficult truths with care, like a trusted mentor\\n3. Be SPECIFIC - reference actual feedback, quote when relevant\\n4. Be ACTIONABLE - suggest concrete improvements when discussing issues\\n5. Be CONVERSATIONAL - this is a dialogue, not a report\\n\\nIf feedback is critical, acknowledge it directly. Don't say \\\"some areas for improvement\\\" when feedback says \\\"this is terrible\\\". But also help the user process it constructively.\\n\\nContext Summary:\\n- Total responses analyzed: {{ $json.summary.totalResponses }}\\n- Sentiment: {{ $json.summary.sentimentBreakdown.positive }} positive, {{ $json.summary.sentimentBreakdown.neutral }} neutral, {{ $json.summary.sentimentBreakdown.critical }} critical\\n- Key Themes: {{ $json.summary.topThemes }}\\n- Priority Actions: {{ $json.summary.priorityActions }}\\n{{ $json.historyContext }}\\n\\n--- Feedback Data ---\\n{{ $json.feedbackContext }}\\n\\n--- Current Question ---\\nUser asks: {{ $json.userMessage }}\\n\\nProvide a helpful, honest response. Be conversational and supportive, but never sugarcoat. Format with markdown for readability.\"\n    }]\n  }]\n}",
+                "options": {}
+            },
+            "name": "Gemini - Chat Response",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4.2,
+            "position": [
+                400,
+                200
+            ],
+            "id": "gemini-chat-response",
+            "notes": "Conversational AI with balanced honesty"
+        },
+        {
+            "parameters": {
+                "jsCode": "// Format chat response with session info\nconst geminiResponse = $input.first().json;\nconst contextData = $('Aggregate Context').first().json;\n\nlet responseText = '';\nlet success = true;\n\ntry {\n  responseText = geminiResponse.candidates[0].content.parts[0].text;\n} catch (error) {\n  responseText = 'I encountered an issue processing your request. Please try again.';\n  success = false;\n}\n\nreturn [{\n  json: {\n    success,\n    sessionId: contextData.sessionId,\n    message: responseText,\n    hasData: contextData.hasData,\n    stats: contextData.summary,\n    timestamp: new Date().toISOString()\n  }\n}];"
+            },
+            "name": "Format Chat Response",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                640,
+                200
+            ],
+            "id": "format-chat-response"
+        },
+        {
+            "parameters": {
+                "respondWith": "json",
+                "responseBody": "={{ $json }}",
+                "options": {
+                    "responseHeaders": {
+                        "entries": [
+                            {
+                                "name": "Access-Control-Allow-Origin",
+                                "value": "*"
+                            }
+                        ]
+                    }
+                }
+            },
+            "name": "Return Chat Response",
+            "type": "n8n-nodes-base.respondToWebhook",
+            "typeVersion": 1,
+            "position": [
+                880,
+                200
+            ],
+            "id": "return-chat-response"
+        },
+        {
+            "parameters": {
+                "rule": {
+                    "interval": [
+                        {
+                            "field": "hours",
+                            "hoursInterval": 6
+                        }
+                    ]
+                }
+            },
+            "name": "Schedule - Auto Update Questions",
+            "type": "n8n-nodes-base.scheduleTrigger",
+            "typeVersion": 1.2,
+            "position": [
+                -560,
+                600
+            ],
+            "id": "schedule-questions",
+            "notes": "Runs every 6 hours to generate fresh questions"
+        },
+        {
+            "parameters": {
+                "method": "POST",
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent",
+                "authentication": "genericCredentialType",
+                "genericAuthType": "httpHeaderAuth",
+                "sendBody": true,
+                "specifyBody": "json",
+                "jsonBody": "={\n  \"contents\": [{\n    \"parts\": [{\n      \"text\": \"Generate 8 insightful survey questions for evaluating performance and gathering constructive feedback.\\n\\nCover these areas:\\n1. Technical Skills (2 questions)\\n2. Quality & Best Practices (2 questions)\\n3. Collaboration & Communication (2 questions)\\n4. Problem Solving & Growth (2 questions)\\n\\nMake questions:\\n- Specific and actionable\\n- Open-ended to encourage detailed responses\\n- Professional and respectful\\n- Focused on honest, constructive feedback\\n\\nReturn as JSON array:\\n[\\n  {\\\"question\\\": \\\"...\\\", \\\"category\\\": \\\"...\\\", \\\"type\\\": \\\"text\\\"},\\n  ...\\n]\\n\\nReturn ONLY the JSON array, no other text.\"\n    }]\n  }]\n}",
+                "options": {}
+            },
+            "name": "Gemini - Generate Questions",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4.2,
+            "position": [
+                -320,
+                600
+            ],
+            "id": "gemini-generate-questions"
+        },
+        {
+            "parameters": {
+                "jsCode": "// Parse generated questions\nconst geminiResponse = $input.first().json;\nconst responseText = geminiResponse.candidates[0].content.parts[0].text;\n\n// Clean markdown formatting\nlet cleanText = responseText.trim();\ncleanText = cleanText.replace(/```json\\n?/g, '').replace(/```\\n?/g, '').trim();\n\nconst questions = JSON.parse(cleanText);\n\nreturn [{\n  json: {\n    questions,\n    generatedAt: new Date().toISOString(),\n    count: questions.length\n  }\n}];"
+            },
+            "name": "Parse Questions",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                -80,
+                600
+            ],
+            "id": "parse-questions"
+        },
+        {
+            "parameters": {
+                "operation": "clear",
+                "documentId": {
+                    "__rl": true,
+                    "value": "YOUR_SHEET_ID",
+                    "mode": "list"
+                },
+                "sheetName": {
+                    "__rl": true,
+                    "value": "gid=3",
+                    "mode": "list",
+                    "cachedResultName": "Questions"
+                },
+                "clear": {
+                    "clearType": "range",
+                    "range": "A2:Z1000"
+                }
+            },
+            "name": "Clear Old Questions",
+            "type": "n8n-nodes-base.googleSheets",
+            "typeVersion": 4,
+            "position": [
+                160,
+                700
+            ],
+            "id": "clear-old-questions"
+        },
+        {
+            "parameters": {
+                "jsCode": "// Format questions for sheet\nconst data = $input.first().json;\nconst questions = data.questions;\n\nconst rows = questions.map((q, index) => ({\n  json: {\n    Number: index + 1,\n    Question: q.question,\n    Category: q.category,\n    Type: q.type || 'text',\n    UpdatedAt: data.generatedAt\n  }\n}));\n\nreturn rows;"
+            },
+            "name": "Format Questions",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                160,
+                500
+            ],
+            "id": "format-questions"
+        },
+        {
+            "parameters": {
+                "operation": "append",
+                "documentId": {
+                    "__rl": true,
+                    "value": "YOUR_SHEET_ID",
+                    "mode": "list"
+                },
+                "sheetName": {
+                    "__rl": true,
+                    "value": "gid=3",
+                    "mode": "list",
+                    "cachedResultName": "Questions"
+                },
+                "columns": {
+                    "mappingMode": "autoMapInputData",
+                    "value": {},
+                    "matchingColumns": [],
+                    "schema": []
+                },
+                "options": {}
+            },
+            "name": "Update Questions Sheet",
+            "type": "n8n-nodes-base.googleSheets",
+            "typeVersion": 4,
+            "position": [
+                400,
+                600
+            ],
+            "id": "update-questions-sheet"
+        }
+    ],
+    "pinData": {},
+    "connections": {
+        "Form Response Trigger": {
+            "main": [
+                [
+                    {
+                        "node": "Store Raw Response",
+                        "type": "main",
+                        "index": 0
+                    },
+                    {
+                        "node": "Structure Response Data",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Structure Response Data": {
+            "main": [
+                [
+                    {
+                        "node": "Gemini - Transform Feedback",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Gemini - Transform Feedback": {
+            "main": [
+                [
+                    {
+                        "node": "Parse AI Response",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Parse AI Response": {
+            "main": [
+                [
+                    {
+                        "node": "Format for Sheets",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Format for Sheets": {
+            "main": [
+                [
+                    {
+                        "node": "Store Cleaned Response",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Webhook - Chat Interface": {
+            "main": [
+                [
+                    {
+                        "node": "Session Manager",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Webhook - CORS Preflight": {
+            "main": [
+                [
+                    {
+                        "node": "CORS Response",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Session Manager": {
+            "main": [
+                [
+                    {
+                        "node": "Fetch All Feedback",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Fetch All Feedback": {
+            "main": [
+                [
+                    {
+                        "node": "Aggregate Context",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Aggregate Context": {
+            "main": [
+                [
+                    {
+                        "node": "Gemini - Chat Response",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Gemini - Chat Response": {
+            "main": [
+                [
+                    {
+                        "node": "Format Chat Response",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Format Chat Response": {
+            "main": [
+                [
+                    {
+                        "node": "Return Chat Response",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Schedule - Auto Update Questions": {
+            "main": [
+                [
+                    {
+                        "node": "Gemini - Generate Questions",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Gemini - Generate Questions": {
+            "main": [
+                [
+                    {
+                        "node": "Parse Questions",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Parse Questions": {
+            "main": [
+                [
+                    {
+                        "node": "Clear Old Questions",
+                        "type": "main",
+                        "index": 0
+                    },
+                    {
+                        "node": "Format Questions",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Clear Old Questions": {
+            "main": [
+                [
+                    {
+                        "node": "Update Questions Sheet",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Format Questions": {
+            "main": [
+                [
+                    {
+                        "node": "Update Questions Sheet",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        }
+    },
+    "active": false,
+    "settings": {
+        "executionOrder": "v1"
+    },
+    "versionId": "enhanced-v1-20231209",
+    "meta": {
+        "instanceId": "enhanced-survey-chat-system"
+    },
+    "id": "enhanced-survey-chat",
+    "tags": []
+}
